@@ -1,0 +1,315 @@
+import os
+import sys
+import io
+import traceback
+import time
+import asyncio
+from os import remove
+from telethon import TelegramClient, events
+import subprocess
+import aiohttp
+
+# API credentials (Sensitive data)
+api_id = "28731539"
+api_hash = "7501dd35f99436e403118ac545d50b4b"
+bot_token = "7749051491:AAEfhrBJ8QHxAZ7N4tD70Yv5dgcEYIsFaPM"
+
+# Restricted files list
+restricted_files = [
+    "Dockerfile", "Eval.py", "README.md", "__pycache__", "main.py",
+    "node_modules", "package-lock.json", "package.json", "requirements.txt",
+    "sessions", "setup.sh"
+]
+
+# Ensure the session directory exists and is writable
+session_path = "/app/sessions"  # Directory that has write permissions
+os.makedirs(session_path, exist_ok=True)
+
+# Initialize the bot with a session file in the writable directory
+client = TelegramClient(f"{session_path}/Pragyan", api_id, api_hash).start(bot_token=bot_token)
+
+# Function to check if bot is alive
+async def check_alive():
+    if client.is_connected:
+        print("Bot is alive and running!")
+        # Send message to your username
+        await client.send_message("@GODAKANTEYA", "Hey! The bot is alive and running.")
+        me = await client.get_me()
+        print(f"Bot info: {me.first_name} (@{me.username})")
+
+# Run the check_alive function after the bot starts
+client.loop.run_until_complete(check_alive())
+
+# ☆☆☆☆☆☆☆☆☆☆☆☆☆☆☆☆☆☆☆☆
+
+@client.on(events.NewMessage(pattern="/start"))
+async def start(event):
+    """Handles the /start command."""
+    await event.reply("Bot is up and running!")
+
+@client.on(events.NewMessage(pattern="/ping"))
+async def ping(event):
+    """Handles the /ping command."""
+    start_time = time.time()
+    await event.reply("Pong!")
+    end_time = time.time()
+    ping_time = (end_time - start_time) * 1000
+    await event.reply(f"Response time: {ping_time:.2f} ms")
+
+def is_accessing_restricted_file(command):
+    """Check if the command attempts to access a restricted file."""
+    return any(file in command for file in restricted_files)
+
+def contains_sensitive_data(content):
+    """Check if the content contains sensitive information like API ID or API Hash."""
+    return api_id in content or api_hash in content
+
+@client.on(events.NewMessage(pattern="/eval"))
+async def eval(event):
+    r = await event.reply("`processing...`")
+    try:
+        code = event.text.split(maxsplit=1)[1]
+    except IndexError:
+        return await r.edit("Give Some Python Codes")
+    
+    # Check if the code tries to access restricted files
+    if is_accessing_restricted_file(code):
+        return await event.reply("You are not allowed to access or modify restricted files.")
+    
+    OLDOUT = sys.stdout
+    OLDER = sys.stderr
+    NEWOUT = sys.stdout = io.StringIO()
+    NEWER = sys.stderr = io.StringIO()
+    stdout, stderr, exc = None, None, None
+    try:
+        value = await aexec(code, event)
+    except Exception:
+        value = None
+        exc = traceback.format_exc()
+    NEWOUTT = NEWOUT.getvalue()
+    NEWERR = NEWER.getvalue()
+    sys.stdout = OLDOUT
+    sys.stderr = OLDER
+    edit = ''
+    if exc:
+        edit = exc
+    elif NEWOUTT:
+        edit = NEWOUTT
+    elif NEWERR:
+        edit = NEWERR
+    else:
+        edit = '<pre><code class=language-Pragyan>__Pragyan__ ♤</code><pre>'
+    final_output = f"<pre><code class=language-python>{code}</code></pre>"
+    final_output += f"<pre><code class=language-python>{edit.strip()}</code></pre>"
+    if len(final_output) > 4096:
+        with open('eval.text', 'w') as file:
+            file.write(final_output)
+            file.close()
+        await r.respond(f"<pre class=language-python>{code[:1080]}</pre>", file='eval.text', parse_mode="html")
+    else:
+        await r.edit(final_output, parse_mode="html")
+
+async def aexec(code, event):
+    exec((
+        "async def __aexec(event):"
+        + "\n p = print"
+        + "\n r = await event.get_reply_message()"
+        + "\n chat = event.chat_id"
+    )
+    + "".join(f"\n {l_}" for l_ in code.split("\n"))
+    )
+    return await locals()["__aexec"](event)
+
+async def bash(cmd):
+    """Execute a bash command and return the stdout and stderr."""
+    process = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    return stdout.decode(), stderr.decode()
+
+@client.on(events.NewMessage(pattern="/bash"))
+async def bash_handler(event):
+    # Check if the user provided a command after /bash
+    try:
+        cmd = event.text.split(" ", maxsplit=1)[1]
+    except IndexError:
+        return await event.reply("Please provide a command to execute after `/bash`.")
+    
+    # Check if the command tries to access restricted files
+    if is_accessing_restricted_file(cmd):
+        return await event.reply("You are not allowed to access or modify restricted files.")
+    
+    xx = await event.reply("Processing command...")
+    reply_to_id = event.reply_to_msg_id or event.id
+
+    # Execute the bash command
+    stdout, stderr = await bash(cmd)
+
+    # Check if the file content contains sensitive information like API keys
+    if contains_sensitive_data(stdout) or contains_sensitive_data(stderr):
+        await xx.delete()
+        return await event.reply("The file you're trying to view contains sensitive information (API keys or hashes) and cannot be displayed.")
+    
+    OUT = f"**☞ BASH\n\n• COMMAND:**\n`{cmd}` \n\n"
+    err, out = "", ""
+    if stderr:
+        err = f"**• ERROR:** \n`{stderr}`\n\n"
+    if stdout:
+        stdout = f"`{stdout}`"
+        out = f"**• OUTPUT:**\n{stdout}"
+    if not stderr and not stdout:
+        out = "**• OUTPUT:**\n`Success`"
+    OUT += err + out
+
+    # If output is too long, save to a file
+    if len(OUT) > 4096:
+        ultd = err + out
+        with BytesIO(str.encode(ultd)) as out_file:
+            out_file.name = "bash.txt"
+            await event.client.send_file(
+                event.chat_id,
+                out_file,
+                force_document=True,
+                allow_cache=False,
+                caption=f"`{cmd}`" if len(cmd) < 998 else None,
+                reply_to=reply_to_id,
+            )
+            await xx.delete()
+    else:
+        await xx.edit(OUT)
+
+
+# JavaScript execution handler with auto-install of missing npm packages
+@client.on(events.NewMessage(pattern=r"/js(?:\s+)?(.*)"))
+async def execute_js(event):
+    processing_message = await event.respond("Processing your JavaScript code...")
+    package_install_message = ""
+    js_code = event.pattern_match.group(1).strip()  # Captures code after /js
+    
+    if event.reply_to_msg_id and not js_code:  # Check if replying to a message with code
+        reply_message = await event.get_reply_message()
+        if reply_message and reply_message.text:
+            js_code = reply_message.text
+    
+    # If no code is provided, use the default example code
+    if not js_code:
+        js_code = """
+        // install: moment
+        const moment = require('moment');
+
+        function displayCurrentTime() {
+            const now = moment();
+            return `Current Date and Time: ${now.format('MMMM Do YYYY, h:mm:ss a')}`;
+        }
+
+        console.log(displayCurrentTime());
+        """
+    
+    # Detect package install directive
+    first_line = js_code.splitlines()[0]
+    packages = []
+    if first_line.startswith("// install:"):
+        packages = first_line[len("// install:"):].strip().split()
+        package_install_message += "Installing packages: " + ", ".join(packages) + "...\n"
+        try:
+            for package in packages:
+                npm_process = await asyncio.create_subprocess_exec(
+                    'npm', 'install', package,
+                    cwd="/app",  # Make sure npm installs in the correct directory
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                npm_stdout, npm_stderr = await npm_process.communicate()
+                npm_errors = npm_stderr.decode().strip()
+                if npm_errors:
+                    raise Exception(f"Package installation error: {npm_errors}")
+            package_install_message += "Packages installed successfully.\n"
+        except Exception as exc:
+            package_install_message += f"Package installation failed: {exc}\n"
+            await event.reply(package_install_message)
+            await processing_message.delete()
+            return
+    
+    # Ensure that the code does not try to access restricted files
+    if is_accessing_restricted_file(js_code):
+        await processing_message.delete()
+        return await event.reply("You are not allowed to access or modify restricted files.")
+    
+    response_js_path = os.path.join(session_path, 'response.js')
+    
+    with open(response_js_path, 'w') as f:
+        f.write(js_code)
+    
+    try:
+        process = await asyncio.create_subprocess_exec(
+            'node', response_js_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        output = stdout.decode().strip() or stderr.decode().strip()
+    except Exception as exc:
+        output = f"An error occurred: {exc}"
+    
+    # Check if the output contains sensitive information
+    if contains_sensitive_data(output):
+        await processing_message.delete()
+        return await event.reply("The JavaScript code output contains sensitive information and cannot be displayed.")
+    
+    output_message = package_install_message + "Output:\n" + output
+    if len(output_message) > 4095:
+        response_txt_path = os.path.join(session_path, 'response.txt')
+        with open(response_txt_path, 'w') as f:
+            f.write(output_message)
+        await event.client.send_file(
+            event.chat_id,
+            response_txt_path,
+            caption="Output is too long, sending as a file. Pasting to SpaceBin...",
+            reply_to=event.reply_to_msg_id,
+        )
+
+        # SpaceBin upload
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://spaceb.in/api/v1/documents", json={"content": output_message}) as response:
+                res_data = await response.json()
+                key = res_data.get("key")
+                if key:
+                    link = f"https://spaceb.in/{key}"
+                    raw = f"https://spaceb.in/api/{key}/raw"
+                    await event.respond(f"• Pasted to SpaceBin: [Space]({link})\n• Raw URL: [Raw]({raw})", reply_to=event.reply_to_msg_id)
+    else:
+        await event.respond(output_message)
+    
+    try:
+        remove(response_js_path)
+        if len(output_message) > 4095:
+            remove(response_txt_path)
+    except Exception:
+        pass
+    
+    await processing_message.delete()
+
+@client.on(events.NewMessage(pattern="/help"))
+async def help(event):
+    """Handles the /help command to explain all available commands."""
+    help_message = """
+    **Available Commands:**
+    - `/start`: Start the bot
+    - `/ping`: Check the bot's response time
+    - `/eval <code>`: Evaluate Python code
+    - `/bash <command>`: Execute a bash command
+    - `/js <code>`: Execute JavaScript code
+    - `/dev`: Display the developer info
+    - `/help`: Show this help message
+    """
+    await event.reply(help_message)
+
+@client.on(events.NewMessage(pattern="/dev"))
+async def dev(event):
+    """Handles the /dev command."""
+    await event.reply("Developer: @akanteya")
+
+client.run_until_disconnected()
